@@ -274,7 +274,7 @@ func (api *FilterAPI) NewPendingTransactionsRecipientWithFilter(ctx context.Cont
 					}
 					receipt := api.execTx(ctx, tx, signer)
 					if receipt != nil {
-						log.Error("could not get receipt")
+						//log.Error("could not get receipt")
 						continue
 					}
 					notifier.Notify(rpcSub.ID, TransactionWithReceipt{rpcTx, receipt})
