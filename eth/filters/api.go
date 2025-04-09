@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"math/big"
@@ -287,13 +288,12 @@ func (api *FilterAPI) NewPendingTransactionsRecipientWithFilter(ctx context.Cont
 }
 
 func (api *FilterAPI) execTx(ctx context.Context, tx *types.Transaction, signer types.Signer) *types.Receipt {
-	type StateReleaseFunc func()
 	type StateBackend interface {
 		Engine() consensus.Engine
 		ChainConfig() *params.ChainConfig
 		HeaderByNumber(context.Context, rpc.BlockNumber) (*types.Header, error)
 		BlockByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Block, error)
-		StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (*state.StateDB, StateReleaseFunc, error)
+		StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (*state.StateDB, tracers.StateReleaseFunc, error)
 	}
 	chainConfig := api.sys.backend.ChainConfig()
 	backend := api.sys.backend.(StateBackend)
