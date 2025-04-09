@@ -22,6 +22,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 	"math/big"
 	"sync"
 	"time"
@@ -214,6 +220,118 @@ func (api *FilterAPI) NewPendingTransactionsWithFilter(ctx context.Context, filt
 	})
 
 	return rpcSub, nil
+}
+
+type TransactionWithReceipt struct {
+	Transaction *ethapi.RPCTransaction
+	Receipt     *types.Receipt
+}
+
+// NewPendingTransactions creates a subscription that is triggered each time a
+// transaction enters the transaction pool. If fullTx is true the full tx is
+// sent to the client, otherwise the hash is sent.
+func (api *FilterAPI) NewPendingTransactionsRecipientWithFilter(ctx context.Context, filter PendingTransactionFilter) (*rpc.Subscription, error) {
+	notifier, supported := rpc.NotifierFromContext(ctx)
+	if !supported {
+		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
+	}
+
+	rpcSub := notifier.CreateSubscription()
+
+	gopool.Submit(func() {
+		txs := make(chan []*types.Transaction, 128)
+		pendingTxSub := api.events.SubscribePendingTxs(txs)
+		defer pendingTxSub.Unsubscribe()
+
+		header := api.sys.backend.CurrentHeader()
+		chainConfig := api.sys.backend.ChainConfig()
+		signer := types.MakeSigner(chainConfig, header.Number, header.Time)
+
+		for {
+			select {
+			case txs := <-txs:
+				// To keep the original behaviour, send a single tx hash in one notification.
+				// TODO(rjl493456442) Send a batch of tx hashes in one notification
+				latest := api.sys.backend.CurrentHeader()
+				for _, tx := range txs {
+					rpcTx := ethapi.NewRPCPendingTransaction(tx, latest, chainConfig)
+					if filter.From != (common.Address{}) {
+						if rpcTx.From != filter.From {
+							continue
+						}
+					}
+					if filter.To != (common.Address{}) {
+						if rpcTx.To == nil || *rpcTx.To != filter.To {
+							continue
+						}
+					}
+
+					if filter.FuncSig != ([4]byte{}) {
+						if !bytes.Equal(rpcTx.Input[:4], filter.FuncSig[:]) {
+							continue
+						}
+					}
+					receipt := api.execTx(ctx, tx, signer)
+					if receipt != nil {
+						log.Error("could not get receipt")
+						continue
+					}
+					notifier.Notify(rpcSub.ID, TransactionWithReceipt{rpcTx, receipt})
+				}
+			case <-rpcSub.Err():
+				return
+			}
+		}
+	})
+	return rpcSub, nil
+}
+
+func (api *FilterAPI) execTx(ctx context.Context, tx *types.Transaction, signer types.Signer) *types.Receipt {
+	type StateReleaseFunc func()
+	type StateBackend interface {
+		Engine() consensus.Engine
+		ChainConfig() *params.ChainConfig
+		HeaderByNumber(context.Context, rpc.BlockNumber) (*types.Header, error)
+		BlockByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Block, error)
+		StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (*state.StateDB, StateReleaseFunc, error)
+	}
+	chainConfig := api.sys.backend.ChainConfig()
+	backend := api.sys.backend.(StateBackend)
+	block, err := backend.BlockByNumber(context.Background(), rpc.PendingBlockNumber)
+	if err != nil {
+		log.Error("failed to get block", "err", err)
+		return nil
+	}
+	// find out tx, exec to get logs
+	statedb, release, err := backend.StateAtBlock(context.Background(), block, 128, nil, true, false)
+	if err != nil {
+		log.Error("failed to get block", "err", err)
+		return nil
+	}
+	defer release()
+	message, err := core.TransactionToMessage(tx, signer, block.Header().BaseFee)
+	if err != nil {
+		log.Error("failed to convert transaction to message", "err", err)
+		return nil
+	}
+	// Apply pre-execution system calls.
+	var tracingStateDB = vm.StateDB(statedb)
+	//if hooks := cfg.Tracer; hooks != nil {
+	//	tracingStateDB = state.NewHookedState(statedb, hooks)
+	//}
+	chainctx := ethapi.NewChainContext(ctx, backend)
+	vmctx := core.NewEVMBlockContext(block.Header(), chainctx, nil)
+
+	evm := vm.NewEVM(vmctx, tracingStateDB, chainConfig, vm.Config{NoBaseFee: true})
+	statedb.SetTxContext(tx.Hash(), 0)
+	gp := new(core.GasPool).AddGas(block.GasLimit())
+	used := uint64(0)
+	receipt, err := core.ApplyTransactionWithEVM(message, gp, statedb, new(big.Int).Add(block.Number(), big.NewInt(1)), block.Hash(), tx, &used, evm)
+	if err != nil {
+		log.Error("failed to apply transaction", "err", err)
+		return nil
+	}
+	return receipt
 }
 
 // NewPendingTransactions creates a subscription that is triggered each time a
