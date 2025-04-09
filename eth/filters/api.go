@@ -297,7 +297,7 @@ func (api *FilterAPI) execTx(ctx context.Context, tx *types.Transaction, signer 
 	}
 	chainConfig := api.sys.backend.ChainConfig()
 	backend := api.sys.backend.(StateBackend)
-	block, err := backend.BlockByNumber(context.Background(), rpc.PendingBlockNumber)
+	block, err := backend.BlockByNumber(context.Background(), rpc.LatestBlockNumber)
 	if err != nil {
 		log.Error("failed to get block", "err", err)
 		return nil
@@ -314,6 +314,8 @@ func (api *FilterAPI) execTx(ctx context.Context, tx *types.Transaction, signer 
 		log.Error("failed to convert transaction to message", "err", err)
 		return nil
 	}
+	// @dev not check nonce
+	message.SkipNonceChecks = true
 	// Apply pre-execution system calls.
 	var tracingStateDB = vm.StateDB(statedb)
 	//if hooks := cfg.Tracer; hooks != nil {
